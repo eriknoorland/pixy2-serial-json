@@ -65,6 +65,7 @@ void loop() {
 void pausedSetup() {
   pixy.setLamp(0, 0);
   pixy.setServos(500, 500);
+  serializeStateChangeResponse(state);
 }
 
 /**
@@ -74,6 +75,7 @@ void lineSetup() {
   pixy.changeProg("line");
   pixy.setLamp(255, 255);
   pixy.setServos(500, 1000);
+  serializeStateChangeResponse(state);
 }
 
 /**
@@ -94,6 +96,7 @@ void blocksSetup() {
   pixy.changeProg("ccc");
   pixy.setLamp(255, 255);
   pixy.setServos(500, 600);
+  serializeStateChangeResponse(state);
 }
 
 /**
@@ -144,6 +147,24 @@ void serializeVector(Vector vector) {
   root["y0"] = vector.m_y0;
   root["x1"] = vector.m_x1;
   root["y1"] = vector.m_y1;
+
+  root.printTo(output);
+  Serial.println(output);
+}
+
+/**
+ * Serialize state change response
+ * @param {int} state
+ */
+void serializeStateChangeResponse(int state) {
+  String output;
+
+  const size_t capacity = JSON_OBJECT_SIZE(2);
+  DynamicJsonBuffer jsonBuffer(capacity);
+
+  JsonObject& root = jsonBuffer.createObject();
+  root["code"] = 200;
+  root["state"] = state;
 
   root.printTo(output);
   Serial.println(output);
