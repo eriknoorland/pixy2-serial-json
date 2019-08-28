@@ -1,11 +1,20 @@
-#include <ArduinoJson.h>
+#include <PacketSerial.h>
 #include <Pixy2.h>
 
 #define REQUEST_START_FLAG 0xA6
-#define MAX_REQUEST_DATA_LENGTH 5
 #define REQUEST_COMMAND_STATE_IDLE 0x10
 #define REQUEST_COMMAND_STATE_LINE 0x15
 #define REQUEST_COMMAND_STATE_BLOCKS 0x20
+
+#define RESPONSE_START_FLAG_1 0xA6
+#define RESPONSE_START_FLAG_2 0x6A
+#define RESPONSE_READY 0xFF
+#define RESPONSE_LINE 0x15
+#define RESPONSE_LINE_DATALENGTH 0x06
+#define RESPONSE_BLOCKS 0x20
+#define RESPONSE_BLOCKS_DATALENGTH 0x08
+#define RESPONSE_STATE_CHANGE 0x25
+#define RESPONSE_STATE_CHANGE_DATALENGTH 0x04
 
 #define STATE_IDLE 0
 #define STATE_LINE 1
@@ -13,10 +22,17 @@
 
 int state = STATE_IDLE;
 
+uint8_t readyResponse[3] = {
+  RESPONSE_START_FLAG_1,
+  RESPONSE_START_FLAG_2,
+  RESPONSE_READY
+};
+
+PacketSerial serial;
 Pixy2 pixy;
 
 /**
- * Set pan / tilt servos
+ * Set pan and tilt servos
  * @param {byte} pan
  * @param {byte} tilt
  */
@@ -36,12 +52,13 @@ void setLamp(byte brightness = 0) {
 }
 
 /**
- * Checks and handles to request coming from the serial port
- * @param {byte array} request
+ * Handles requests coming from the serial port
+ * @param {uint8_t} buffer
+ * @param {size_t} size
  */
-void handleSerialRequest(byte request[]) {
-  byte startFlag = request[0];
-  byte command = request[1];
+void onPacketReceived(const uint8_t* buffer, size_t size) {
+  byte startFlag = buffer[0];
+  byte command = buffer[1];
   byte optionals;
 
   if (startFlag == REQUEST_START_FLAG) {
@@ -50,66 +67,26 @@ void handleSerialRequest(byte request[]) {
         setServos();
         setLamp();
         state = STATE_IDLE;
-        serializeStateChangeResponse(state);
+        sendStateChangeResponse(state);
         break;
         
       case REQUEST_COMMAND_STATE_LINE:
-        setServos(request[2], request[3]);
-        setLamp(request[4]);
+        setServos(buffer[2], buffer[3]);
+        setLamp(buffer[4]);
         pixy.changeProg("line");
         state = STATE_LINE;
-        serializeStateChangeResponse(state);
+        sendStateChangeResponse(state);
         break;
 
       case REQUEST_COMMAND_STATE_BLOCKS:
-        setServos(request[2], request[3]);
-        setLamp(request[4]);
+        setServos(buffer[2], buffer[3]);
+        setLamp(buffer[4]);
         pixy.changeProg("ccc");
         state = STATE_BLOCKS;
-        serializeStateChangeResponse(state);
+        sendStateChangeResponse(state);
         break;
     }
   }
-}
-
-/**
- * Check the serial line for requests
- */
-void checkSerialRequest() {
-  byte request[MAX_REQUEST_DATA_LENGTH] = {};
-
-  if (Serial.available() > 0) {
-    int i = 0;
-
-    while (Serial.available() > 0) {
-      request[i] = Serial.read();
-      i++;
-      delay(1);
-    }
-
-    handleSerialRequest(request);
-
-    // reset request array
-    for (int i = 0; i < MAX_REQUEST_DATA_LENGTH; i++) {
-      request[i] = (char)0;
-    }
-  }
-}
-
-/**
- * 
- */
-void sendReadyEvent() {
-  String output;
-
-  const size_t capacity = JSON_OBJECT_SIZE(1);
-  DynamicJsonBuffer jsonBuffer(capacity);
-
-  JsonObject& root = jsonBuffer.createObject();
-  root["status"] = "ready";
-
-  root.printTo(output);
-  Serial.println(output);
 }
 
 /**
@@ -119,7 +96,7 @@ void lineLoop() {
   pixy.line.getMainFeatures();
 
   for (int8_t i = 0; i < pixy.line.numVectors; i++) {
-    serializeVector(pixy.line.vectors[i]);
+    sendVectorResponse(pixy.line.vectors[i]);
   }
 }
 
@@ -127,73 +104,70 @@ void lineLoop() {
  * Blocks loop
  */
 void blocksLoop() {
-  String output;
   pixy.ccc.getBlocks();
 
   if (pixy.ccc.numBlocks) {
-    const size_t bufferSize = JSON_ARRAY_SIZE(pixy.ccc.numBlocks) + JSON_OBJECT_SIZE(pixy.ccc.numBlocks * 8);
-    
-    DynamicJsonBuffer jsonBuffer(bufferSize);
-    JsonArray& blocks = jsonBuffer.createArray();
-    
     for (int i = 0; i < pixy.ccc.numBlocks; i++) {
       Block block = pixy.ccc.blocks[i];
-      JsonObject& jsonBlock = blocks.createNestedObject();
-      jsonBlock["signature"] = block.m_signature;
-      jsonBlock["x"] = block.m_x;
-      jsonBlock["y"] = block.m_y;
-      jsonBlock["width"] = block.m_width;
-      jsonBlock["height"] = block.m_height;
-      jsonBlock["index"] = block.m_index;
-      jsonBlock["angle"] = block.m_angle;
-      jsonBlock["age"] = block.m_age;
-    }
 
-    blocks.printTo(output);
-    Serial.println(output);
+      uint8_t response[12] = {
+        RESPONSE_START_FLAG_1,
+        RESPONSE_START_FLAG_2,
+        RESPONSE_BLOCKS,
+        RESPONSE_BLOCKS_DATALENGTH,
+        block.m_signature,
+        block.m_x,
+        block.m_y,
+        block.m_width,
+        block.m_height,
+        block.m_index,
+        block.m_angle,
+        block.m_age
+      };
+
+      serial.send(response, sizeof(response));
+    }
   }
 }
 
 /**
- * Serialize vector
+ * Send vector response
  * @param {Vector} vector
  */
-void serializeVector(Vector vector) {
-  String output;
+void sendVectorResponse(Vector vector) {
+  uint8_t response[10] = {
+    RESPONSE_START_FLAG_1,
+    RESPONSE_START_FLAG_2,
+    RESPONSE_LINE,
+    RESPONSE_LINE_DATALENGTH,
+    vector.m_index,
+    vector.m_flags,
+    vector.m_x0,
+    vector.m_y0,
+    vector.m_x1,
+    vector.m_y1
+  };
 
-  const size_t bufferSize = JSON_OBJECT_SIZE(6);
-  DynamicJsonBuffer jsonBuffer(bufferSize);
-
-  JsonObject& root = jsonBuffer.createObject();
-  root["index"] = vector.m_index;
-  root["flags"] = vector.m_flags;
-  root["x0"] = vector.m_x0;
-  root["y0"] = vector.m_y0;
-  root["x1"] = vector.m_x1;
-  root["y1"] = vector.m_y1;
-
-  root.printTo(output);
-  Serial.println(output);
+  serial.send(response, sizeof(response));
 }
 
 /**
- * Serialize state change response
+ * Send state change response
  * @param {int} state
  */
-void serializeStateChangeResponse(int state) {
-  String output;
+void sendStateChangeResponse(int state) {
+  uint8_t response[8] = {
+    RESPONSE_START_FLAG_1,
+    RESPONSE_START_FLAG_2,
+    RESPONSE_STATE_CHANGE,
+    RESPONSE_STATE_CHANGE_DATALENGTH,
+    0xC8,
+    state,
+    pixy.frameWidth,
+    pixy.frameHeight
+  };
 
-  const size_t capacity = JSON_OBJECT_SIZE(4);
-  DynamicJsonBuffer jsonBuffer(capacity);
-
-  JsonObject& root = jsonBuffer.createObject();
-  root["code"] = 200;
-  root["state"] = state;
-  root["frameWidth"] = pixy.frameWidth;
-  root["frameHeight"] = pixy.frameHeight;
-
-  root.printTo(output);
-  Serial.println(output);
+  serial.send(response, sizeof(response));
 }
 
 /**
@@ -201,6 +175,9 @@ void serializeStateChangeResponse(int state) {
  */
 void setup() {
   Serial.begin(115200);
+  serial.setStream(&Serial);
+  serial.setPacketHandler(&onPacketReceived);
+
   pixy.init();
 
   // wait for serial port to connect. Needed for native USB
@@ -208,16 +185,16 @@ void setup() {
 
   setServos();
   setLamp();
-  sendReadyEvent();
-  serializeStateChangeResponse(state);
+  
+  serial.send(readyResponse, sizeof(readyResponse));
+
+  sendStateChangeResponse(state);
 }
 
 /**
  * Loop
  */
 void loop() {
-  checkSerialRequest();
-
   switch (state) {
     case STATE_LINE:
       lineLoop();
@@ -226,4 +203,6 @@ void loop() {
       blocksLoop();
       break;
   }
+
+  serial.update();
 }
